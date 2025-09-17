@@ -1,297 +1,173 @@
-# Automate Mundane Tasks
+# Kramen Backend
 
-This project makes it easy for language models to use many different tools and APIs at once. It connects LLMs to third-party services using tool calling and Retrieval-Augmented Generation (RAG), so you can handle complex tasks with simple queries. Proxies are used to provide isolated, scalable access to each integration.
+An intelligent automation platform that connects large language models to hundreds of third-party APIs through RAG-powered tool retrieval. This project enables LLMs to handle complex, multi-step workflows by intelligently selecting and executing the right API endpoints based on natural language queries.
 
+## System Design & Architecture
 
-To make integrations, you make a proxy to another API. This proxy serves as a simpler API that is easier for LLMs to interpret. The OpenAPI spec of that API serves as the documentation of tools. This can be upserted into the vector database (Qdrant) via `/integrations/upload-openapi`
+### Tech Stack
 
-## Getting Started with the UI
+**Backend:**
+- FastAPI - High-performance web framework
+- SQLAlchemy - Database ORM
 
-To set up the user interface, make sure to install and run the frontend. The frontend code is located in the `frontend/` directory. Follow the instructions in the `frontend/README.md` to install dependencies and start the development server.
+**RAG & Generative AI:**
+- DSPy - Programming framework for AI systems
+- Qdrant - Vector database for embeddings
+- FastEmbed - Embedding generation
 
+**Frontend:**
+- Next.js - React framework
+- Shadcn UI - Component library
 
-## Proxy Configuration
+## How It Works
 
-The proxy system provides isolated endpoints for different third-party integrations. Each integration runs as an independent FastAPI application on its own port.
+### RAG-Powered Tool Calling
 
-### Proxy Module Configuration
+Traditional tool calling approaches fail when dealing with hundreds of API endpoints. Modern APIs often have 100+ endpoints, but LLMs can only reliably handle 30-40 tools simultaneously. Our solution uses Retrieval-Augmented Generation (RAG) to intelligently select the most relevant endpoints before execution.
 
-Configure proxy modules in `proxies/config.py`:
+### Connecting a Platform
 
-```python
-PROXY_MODULES = {
-    "linear": {
-        "enabled": True,
-        "port": 8001,
-        "host": "0.0.0.0",
-        "module_path": "apps.linear.main",
-        "router_name": "linear_router"
-    },
-    "google_calendar": {
-        "enabled": True,
-        "port": 8002,
-        "host": "0.0.0.0",
-        "module_path": "apps.google_calendar.main",
-        "router_name": "calendar_router"
-    }
-}
-```
+#### Method 1: OpenAPI Spec Available (e.g., Linear)
 
-### Creating a New Integration Proxy
+When a platform provides OpenAPI documentation:
 
-To create a new integration proxy, follow this structured approach:
+1. **Ingestion**: We selectively ingest endpoints from the OpenAPI spec as JSON, capturing:
+   - URLs and descriptions
+   - Request/response schemas
+   - Supported HTTP methods
 
-1. **Create the module directory structure**:
-```
-proxies/apps/your_integration/
-├── __init__.py
-├── main.py              # FastAPI router with endpoints
-├── client/
-│   ├── __init__.py
-│   └── client.py        # API client for the third-party service
-└── schemas/
-    ├── __init__.py
-    └── schemas.py       # Pydantic models for requests/responses
-```
+2. **Intent Association**: Each endpoint gets an associated "intent" - a natural language description of when a user would call this endpoint
+   - Example: "create a ticket" for ticket creation endpoints
 
-2. **Implement the API client** (`client/client.py`):
-```python
-import httpx
-from typing import Dict, Any
+3. **Vector Storage**: Intents are converted to vectors using hybrid embedding models and stored in Qdrant
 
-class YourIntegrationClient:
-    def __init__(self, api_key: str, base_url: str):
-        self.api_key = api_key
-        self.base_url = base_url
-        self.client = httpx.AsyncClient()
-    
-    async def get_data(self, endpoint: str, params: Dict[str, Any] = None):
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        response = await self.client.get(
-            f"{self.base_url}/{endpoint}",
-            headers=headers,
-            params=params
-        )
-        return response.json()
-    
-    async def post_data(self, endpoint: str, data: Dict[str, Any]):
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        response = await self.client.post(
-            f"{self.base_url}/{endpoint}",
-            headers=headers,
-            json=data
-        )
-        return response.json()
-```
+4. **Embedding Strategy**: We use a combination of 3 dense and sparse embedding models for optimal retrieval accuracy
 
-3. **Define Pydantic schemas** (`schemas/schemas.py`):
-```python
-from pydantic import BaseModel
-from typing import Optional, List
+#### Method 2: No OpenAPI Spec Available
 
-class CreateItemRequest(BaseModel):
-    title: str
-    description: Optional[str] = None
-    tags: List[str] = []
+When OpenAPI documentation isn't available:
 
-class ItemResponse(BaseModel):
-    id: str
-    title: str
-    description: Optional[str]
-    created_at: str
-    updated_at: str
-```
+1. **Custom Wrapper**: We build a FastAPI wrapper around the platform's API
+2. **Auto-Generated Spec**: FastAPI automatically generates OpenAPI documentation for our wrapper
+3. **Standard Ingestion**: The generated spec follows the same ingestion process as Method 1
 
-4. **Implement the FastAPI router** (`main.py`):
-```python
-from fastapi import APIRouter, HTTPException, Header, Depends
-from typing import Optional, List
-from .client.client import YourIntegrationClient
-from .schemas.schemas import CreateItemRequest, ItemResponse
+### Query Execution Pipeline
 
-your_integration_router = APIRouter(
-    prefix="/your-integration",
-    tags=["Your Integration"]
-)
+1. **Query Preprocessing**: 
+   - Rephrase user queries to remove slang and improve retrieval quality
+   - Normalize language for better vector matching
 
-def get_client(authorization: str = Header(...)):
-    # Parse authorization header and create client
-    api_key = authorization.replace("Bearer ", "")
-    return YourIntegrationClient(
-        api_key=api_key,
-        base_url="https://api.yourintegration.com"
-    )
+2. **Endpoint Retrieval**:
+   - Use the processed query to retrieve top 3 most relevant API endpoints from Qdrant
+   - Apply LLM-based filtering to select the optimal endpoint
 
-@your_integration_router.get("/items", response_model=List[ItemResponse])
-async def get_items(client: YourIntegrationClient = Depends(get_client)):
-    try:
-        items = await client.get_data("items")
-        return items
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+3. **Request Execution**:
+   - Generate and execute the appropriate API request
+   - Use response data as context for next steps or final response generation
 
-@your_integration_router.post("/items", response_model=ItemResponse)
-async def create_item(
-    item: CreateItemRequest,
-    client: YourIntegrationClient = Depends(get_client)
-):
-    try:
-        result = await client.post_data("items", item.dict())
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-```
+4. **Response Generation**:
+   - Synthesize API responses into natural language
+   - Determine if additional API calls are needed for complex workflows
 
-5. **Add to proxy configuration**:
-Add your integration to `proxies/config.py`:
-```python
-"your_integration": {
-    "enabled": True,
-    "port": 8003,  # Choose an available port
-    "host": "0.0.0.0",
-    "module_path": "apps.your_integration.main",
-    "router_name": "your_integration_router"
-}
-```
+## Design Choices & Differentiation
 
-6. **Test the integration**:
-```bash
-# List all configured modules
-python -m proxies.run_servers --list
+### Why RAG Over Traditional Tool Calling?
 
-# Start your specific integration
-python -m proxies.run_servers --module your_integration
+**Scalability**: Traditional tool calling hits reliability limits around 30-40 tools. RAG enables connection to hundreds of endpoints by retrieving only relevant tools.
 
-# Or start all integrations
-python -m proxies.run_servers --all
-```
+**Cost Efficiency**: Instead of passing all available tools to the LLM context, RAG retrieves only the top-k most relevant endpoints, dramatically reducing token consumption.
 
-### Authentication Handling
+**Reliability**: RAG-based selection is more reliable than asking LLMs to choose from hundreds of options simultaneously.
 
-For integrations requiring authentication, implement header-based auth:
+### Advantages Over MCP (Model Context Protocol)
 
-```python
-from fastapi import Header, HTTPException
-import json
+**Token Efficiency**: MCP servers hosting hundreds of tools must pass all tools to the LLM context, causing massive token consumption. Our RAG approach reduces this by 10-100x.
 
-def parse_auth_header(x_auth: str = Header(...)):
-    try:
-        auth_data = json.loads(x_auth)
-        return auth_data
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid X-Auth header")
+**Loop Prevention**: MCPs frequently get stuck in infinite loops when dealing with complex tool selections. Our filtered approach prevents this issue.
 
-@your_integration_router.get("/protected-endpoint")
-async def protected_endpoint(auth_data: dict = Depends(parse_auth_header)):
-    # Use auth_data to authenticate with the third-party API
-    client = YourIntegrationClient(
-        api_key=auth_data.get("api_key"),
-        base_url=auth_data.get("base_url", "https://api.default.com")
-    )
-    return await client.get_data("protected-resource")
-```
+**Cost Effectiveness**: Significantly lower operational costs due to reduced token usage and more efficient execution paths.
 
-## Installation
+**Documented Issues with MCPs**:
+- [Anything LLM Loop Issues](https://github.com/Mintplex-Labs/anything-llm/issues/4223)
+- [Kilocode Loop Errors](https://www.reddit.com/r/kilocode/comments/1kwh8as/seeming_to_get_a_lot_of_loop_error_issues/)
+- [Windsurf Sequential Thinking Stuck](https://www.reddit.com/r/windsurf/comments/1mbdlnm/sequential_thinking_mcp_stuck/)
+- [Cursor Endless Loops](https://forum.cursor.com/t/endless-loop-of-mcp-use/87638)
+
+## Social Impact
+
+### Productivity Enhancement
+
+According to ProcessMaker research, knowledge workers waste 1.5-4.6 hours per week on manual copy-paste and ticketing tasks. By automating these mundane activities, we enable:
+
+- **Productivity Gains**: Redirect focus toward high-value, creative, and strategic work
+- **Job Satisfaction**: Reduce repetitive tasks that lead to burnout
+- **Organizational Growth**: Enable teams to focus on innovation rather than manual processes
+- **Efficiency Improvements**: Streamline workflows across multiple platforms and tools
+
+### Automation Benefits
+
+- **Error Reduction**: Eliminate human errors in repetitive tasks
+- **Consistency**: Ensure standardized processes across teams
+- **Scalability**: Handle increasing workloads without proportional staff increases
+- **Integration**: Seamlessly connect disparate tools and platforms
+
+## Getting Started
 
 ### Prerequisites
-
-- Python 3.8 or higher
+- Python 3.8+
 - Redis server (6.0+)
 - Qdrant vector database (1.0+)
 
-### Environment Setup
+### Quick Setup
 
-1. Clone the repository:
+1. **Clone and Install**:
 ```bash
 git clone <repository-url>
-```
-
-2. Create and activate virtual environment:
-```bash
+cd kramen-backend
 python -m venv venv
 source venv/bin/activate  # Linux/macOS
-# or
-venv\Scripts\activate     # Windows
-```
-
-3. Install dependencies:
-```bash
+# or venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 ```
 
-4. Configure environment variables:
+2. **Configure Environment**:
 ```bash
 cp env.example .env
+# Edit .env with your API keys and database URLs
 ```
 
-Edit the `.env` file with your configuration:
-
-```bash
-# Database Configuration
-DATABASE_URL=sqlite:///dev.db
-
-# Cache Layer
-REDIS_URL=redis://localhost:6379
-
-# Vector Database
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=
-
-# AI Model Configuration
-OPENAI_API_KEY=your_openai_key
-ANTHROPIC_API_KEY=your_anthropic_key
-GOOGLE_API_KEY=your_google_key
-
-# Google OAuth
-GOOGLE_CLIENT_ID=your_client_id
-GOOGLE_CLIENT_SECRET=your_client_secret
-GOOGLE_PROJECT_ID=your_project_id
-GOOGLE_REDIRECT_URI=http://localhost:5173/callback
-```
-
-5. Initialize the database:
+3. **Initialize Database**:
 ```bash
 python -c "from models import Base, engine; Base.metadata.create_all(bind=engine)"
 ```
 
-## Usage
-
-### Starting the Main Application
-
+4. **Start Services**:
 ```bash
+# Main application
 uvicorn main:app --reload --port 5000
-```
 
-The API will be available at `http://localhost:5000` with interactive documentation at `http://localhost:5000/docs`.
-
-### Proxy Server Management
-
-Start all configured proxy servers:
-```bash
+# Proxy servers (in separate terminal)
 python -m proxies.run_servers --all
 ```
 
-Start a specific proxy module:
+### Frontend Setup
+
+The frontend is located in the `frontend/` directory:
+
 ```bash
-python -m proxies.run_servers --module linear
+cd frontend
+npm install
+npm run dev
 ```
 
-List available modules:
-```bash
-python -m proxies.run_servers --list
-```
-
-## Query Processing
-
-The system processes natural language queries through a multi-stage RAG pipeline that automatically selects appropriate integrations and executes API calls.
+## API Usage
 
 ### Query Execution
-
 ```bash
 curl -X POST "http://localhost:5000/run/query" \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "Get my Linear issues from this week",
+    "query": "Create a Linear issue for the bug I found",
     "user_context": {
       "integrations": ["linear"],
       "auth_data": {"api_key": "your_linear_key"}
@@ -299,88 +175,13 @@ curl -X POST "http://localhost:5000/run/query" \
   }'
 ```
 
-### Query Processing Pipeline
-
-1. **Query Decomposition**: Break down complex queries into actionable components
-2. **Integration Selection**: Choose appropriate integrations based on query intent
-3. **Endpoint Filtering**: Identify relevant API endpoints for the query
-4. **Request Generation**: Create properly formatted API requests
-5. **Response Synthesis**: Combine results into coherent responses
-
-## OAuth Setup
-
-### Google OAuth Configuration
-
-Configure Google Calendar integration:
+### Integration Management
 ```bash
-python -m utils.google_auth
-```
-
-This will guide you through the OAuth flow and generate the necessary authentication tokens.
-
-## API Documentation
-
-### Integration Management Endpoints
-
-**POST** `/integrations/create`
-- Create new third-party integration
-- Requires integration name, description, and authentication structure
-
-**GET** `/integrations/all`
-- Retrieve all configured integrations
-- Returns integration metadata and status
-
-**DELETE** `/integrations/delete`
-- Remove integration configuration
-- Cascades to associated endpoints and data
-
-**POST** `/integrations/upload-openapi`
-- Upload OpenAPI specification for integration
-- Automatically processes endpoints and schemas
-
-### Query Processing Endpoints
-
-**POST** `/run/query`
-- Execute AI-powered query against configured integrations
-- Supports natural language query processing
-- Returns structured response with source attribution
-
-**GET** `/run/endpoints`
-- List available API endpoints across all integrations
-- Includes endpoint metadata and parameter specifications
-
-### Proxy Endpoints
-
-Each proxy module operates on its configured port:
-- Linear: `http://localhost:8001`
-- Google Calendar: `http://localhost:8002`
-
-## Configuration
-
-### Embedding Model Configuration
-
-The system supports multiple embedding approaches:
-
-- **Dense Embeddings**: `sentence-transformers/all-MiniLM-L6-v2`
-- **Sparse Embeddings**: `Qdrant/bm25`
-- **Late Interaction**: `colbert-ir/colbertv2.0`
-
-Configure models in `config.py`:
-
-```python
-DENSE_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-SPARSE_EMBEDDING_MODEL = "bm25"
-LATE_EMBEDDING_MODEL = "colbertv2.0"
-```
-
-### LLM Provider Configuration
-
-The system supports multiple language model providers through the DSPy framework:
-
-```python
-LLM_API_KEYS = {
-    "openai/gpt-4.1": os.getenv("OPENAI_API_KEY"),
-    "claude-3-sonnet": os.getenv("ANTHROPIC_API_KEY"),
-    "gemini-2.5-pro": os.getenv("GOOGLE_API_KEY"),
-}
+# Upload OpenAPI spec
+curl -X POST "http://localhost:5000/integrations/upload-openapi" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "integration_name": "linear",
+    "openapi_spec": {...}
+  }'
 ```
