@@ -1,4 +1,7 @@
-# Kramen Backend
+Author Info: 
+Yuvraj Motiramani
+Mathematics and Computing
+IIT Jammu
 
 An intelligent automation platform that connects large language models to hundreds of third-party APIs through RAG-powered tool retrieval. This project enables LLMs to handle complex, multi-step workflows by intelligently selecting and executing the right API endpoints based on natural language queries.
 
